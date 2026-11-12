@@ -3314,7 +3314,10 @@ function createRoom(max){
     S.code = rid(4);
     const peer = new Peer(PREFIX + S.code, peerOptions());
     S.peer = peer;
+    let inited = false;
     peer.on("open", () => {
+      /* „open" feuert auch nach jedem Wiederverbinden zum Vermittler (z. B. nach Safari-Hintergrund) – der Raum darf dabei NICHT zurückgesetzt werden */
+      if(inited || peer !== S.peer) return; inited = true;
       S.players = [{ token:S.token, name, ready:false, connected:true, conn:null, seen:Date.now() }];
       S.you = 0; S.seats = []; S.game = null;
       setPhase("lobby"); startHeartbeat(); renderAll(); $("ol-create").disabled = false;
@@ -3426,6 +3429,7 @@ function startHeartbeat(){
     S.lastTick = now;
     if(S.role === "host"){
       S.players.forEach(p => { if(p.conn && p.token !== S.token && now - p.seen > 14000){ const c = p.conn; hostDrop(c); try{ c.close(); }catch(e){} } });
+      hostRevive(0);                                           /* Raum-Peer tot oder getrennt? -> wieder anmelden */
       updatePause();
     }else if(S.role === "client" && S.hostConn){
       sendTo(S.hostConn, { t:"ping", seq:S.seq });
@@ -3437,22 +3441,32 @@ function startHeartbeat(){
 }
 
 /* ---------- Zurück in den Vordergrund: Verbindung sofort prüfen/erneuern ---------- */
-function hostRevive(tries){
-  const pr = S.peer; if(S.role !== "host" || S.leaving || !pr) return;
+function hostRevive(tries, force){
+  const pr = S.peer; if(S.role !== "host" || S.leaving || S.restoring || !pr) return;
   if(pr.destroyed){
+    const now = Date.now(); if(!force && now - (S.reviveAt || 0) < 5000) return;   /* nicht öfter als alle 5 s neu versuchen */
+    S.reviveAt = now;
     const np = new Peer(PREFIX + S.code, peerOptions()); S.peer = np;
+    np.on("open", () => { S.reviveAt = 0; });
     np.on("connection", hostAccept);
     np.on("disconnected", () => { setTimeout(() => { if(np === S.peer && np.disconnected && !np.destroyed){ try{ np.reconnect(); }catch(e){} } }, 1000); });
-    np.on("error", e => { if(e && e.type === "unavailable-id" && (tries || 0) < 20 && S.role === "host" && !S.leaving) setTimeout(() => hostRevive((tries || 0) + 1), 1500); });
+    /* Fehler (Netz weg, Code noch belegt …): Peer verwerfen – der Herzschlag startet automatisch den nächsten Versuch */
+    np.on("error", e => { if(np === S.peer && !np.open && !np.destroyed && S.role === "host" && !S.leaving){ try{ np.destroy(); }catch(x){} } });
   } else if(pr.disconnected){ try{ pr.reconnect(); }catch(e){} }
 }
 function onWake(){
-  if(S.leaving || !S.role || S.phase === "login") return;
+  if(S.leaving || !S.role) return;
+  if(S.restoring){                                              /* Wiederherstellung läuft: sofort neuer Versuch */
+    if(S.role === "host"){ if(S.restoreKick) S.restoreKick(); }
+    else { S.reconnecting = true; scheduleRetry(0); }
+    return;
+  }
+  if(S.phase === "login") return;
   const now = Date.now();
   S.lastTick = now;
   if(S.role === "host"){
     S.players.forEach(p => { p.seen = now; });                 /* nicht sofort alle als „weg" werten */
-    hostRevive(0);
+    hostRevive(0, true);
   }else{
     const c = S.hostConn;
     if(!c || !c.open || (S.lastHost && now - S.lastHost > 6000)){
@@ -3476,7 +3490,7 @@ function joinRoom(code){
   S.mySeat = -1; S.role = "client"; S.name = name; S.token = myToken(); S.code = code; S.leaving = false; S.reconnecting = false; S.retryCount = 0;
   const peer = new Peer(undefined, peerOptions());
   S.peer = peer;
-  peer.on("open", () => clientConnect(true));
+  peer.on("open", () => { if(S.hostConn && S.hostConn.open) return; clientConnect(!S.hostConn); });   /* erneutes „open" nach Reconnect: bestehende Verbindung nicht ersetzen */
   peer.on("disconnected", () => { try{ peer.reconnect(); }catch(e){} });
   peer.on("error", e => {
     if(S.phase === "login"){ $("ol-join").disabled = false; setErr(netErr(e)); try{ peer.destroy(); }catch(x){} S.peer = null; S.role = null; }
@@ -3500,7 +3514,7 @@ function joinFail(msg){
   try{ S.peer.destroy(); }catch(e){} S.peer = null; S.role = null; S.hostConn = null;
 }
 function clientLost(){
-  if(S.leaving || S.role !== "client" || S.phase === "login") return;
+  if(S.leaving || S.role !== "client" || (S.phase === "login" && !S.restoring)) return;
   if(!S.reconnecting){ S.reconnecting = true; S.retryCount = 0; renderAll(); }
   scheduleRetry();
 }
@@ -3508,8 +3522,8 @@ function scheduleRetry(ms){
   clearTimeout(S.retryTimer);
   const d = (ms != null) ? ms : (S.retryCount < 4 ? 1000 : S.retryCount < 30 ? 2500 : 5000);   /* erst schnell, dann langsamer */
   S.retryTimer = setTimeout(() => {
-    if(S.leaving || S.phase === "login" || S.role !== "client") return;
-    if(++S.retryCount > 140){                                  /* ca. 10 Minuten aktive Wartezeit */ S.reconnecting = false; leaveRoom(false); showMsg("Verbindung verloren", "Die Verbindung zum Raum konnte nicht wiederhergestellt werden."); return; }
+    if(S.leaving || (S.phase === "login" && !S.restoring) || S.role !== "client") return;
+    S.retryCount++;                                            /* nie automatisch aufgeben – „Verlassen" bleibt Sache des Spielers */
     const pr = S.peer;
     if(!pr || pr.destroyed || (pr.disconnected && S.retryCount % 4 === 0)){
       try{ pr && pr.destroy(); }catch(e){}
@@ -3527,11 +3541,11 @@ function scheduleRetry(ms){
 function clientData(m){
   if(!m || typeof m !== "object") return;
   switch(m.t){
-    case "hi": if(S.reconnecting){ S.reconnecting = false; renderAll(); } startHeartbeat(); break;
+    case "hi": if(S.restoring){ S.restoring = false; overlay("ol-msg", null); } if(S.reconnecting){ S.reconnecting = false; renderAll(); } startHeartbeat(); break;
     case "pong": break;
     case "nak": S.ackWait = 0; toast("Das ging nicht durch – bitte noch einmal tippen."); sendTo(S.hostConn, { t:"sync", seq:S.seq }); break;
     case "deny":
-      clearSess();
+      S.restoring = false; clearSess();
       S.leaving = true; setPhase("login"); showMsg("Beitritt nicht möglich", m.why || "Der Raum hat dich abgelehnt.");
       try{ S.hostConn.close(); }catch(e){} try{ S.peer.destroy(); }catch(e){} S.peer = null; S.role = null; S.leaving = false;
       $("ol-join").disabled = false; setErr(m.why || ""); break;
@@ -3669,6 +3683,8 @@ function onStart(m){
   else { const i = S.players.findIndex(p => p.name === S.name); if(S.mySeat < 0 && i >= 0) S.mySeat = i; if(S.you >= 0) S.mySeat = S.you; }
   if(S.role === "client"){ document.body.setAttribute("data-ol", "playing"); S.phase = "playing"; }
   setPhase("playing");
+  /* Nach Neuladen (Safari hat die Seite verworfen) ist noch der Standard-Tab offen: Tab des laufenden Spiels aktivieren */
+  { const app = $("app-" + S.game), tb = $("tab-" + S.game); if(app && tb && !app.classList.contains("active")) runReplay(() => tb.click()); }
   if(m.resume && S.started) return;                           /* Spiel läuft bei uns schon */
   S.log = []; S.buf = {};
   rngOn = true; reseed(S.seed, 0);
@@ -4321,7 +4337,7 @@ document.addEventListener("input", onInputCapture, true);
 window.addEventListener("beforeunload", () => { if(S.role === "client" && S.phase !== "playing") sendTo(S.hostConn, { t:"leave" }); });
 
 /* ---------- Sitzung merken: nach Neuladen (z. B. iPad-Safari verwirft die Seite) automatisch zurück in den Raum ---------- */
-const SESS_KEY = "gt-sess", SESS_MAX_AGE = 4 * 3600 * 1000;
+const SESS_KEY = "gt-sess", SESS_MAX_AGE = 3 * 24 * 3600 * 1000;   /* gesicherter Spielstand bleibt 3 Tage erhalten */
 let saveT = 0;
 function clearSess(){ clearTimeout(saveT); saveT = 0; try{ localStorage.removeItem(SESS_KEY); }catch(e){} }
 function saveSessNow(){
@@ -4337,18 +4353,48 @@ function saveSessNow(){
     localStorage.setItem(SESS_KEY, JSON.stringify(o));
   }catch(e){}
 }
-function saveSess(){ if(!saveT) saveT = setTimeout(saveSessNow, 600); }
+function saveSess(){ if(!saveT) saveT = setTimeout(saveSessNow, 250); }
 document.addEventListener("visibilitychange", () => { if(document.hidden) saveSessNow(); });
 window.addEventListener("pagehide", saveSessNow);
+document.addEventListener("freeze", saveSessNow);
 
+/* Wiederherstellungs-Fenster: bleibt, bis der Raum wieder steht – der gesicherte Stand wird dabei nie gelöscht */
+function showRestore(confirming){
+  overlay("ol-msg", b => {
+    if(confirming){
+      b.appendChild(h("h3", { text:"Wiederherstellung abbrechen?" }));
+      b.appendChild(h("p", { text:"Der gesicherte Spielstand geht dann verloren." }));
+      b.appendChild(h("button", { type:"button", class:"btn btn-primary", text:"Weiter warten", onclick:() => showRestore(false) }));
+      b.appendChild(h("button", { type:"button", class:"btn btn-ghost", text:"Abbrechen und verwerfen", onclick:cancelRestore }));
+    }else{
+      b.appendChild(h("h3", { text:"Spiel wird wiederhergestellt …" }));
+      b.appendChild(h("p", { text:"Dein Spielstand ist gesichert. Das kann einen Moment dauern – es wird automatisch weiter versucht." }));
+      b.appendChild(h("button", { type:"button", class:"btn btn-ghost", text:"Abbrechen", onclick:() => showRestore(true) }));
+    }
+  });
+}
+function cancelRestore(){
+  S.restoring = false; S.restoreKick = null;
+  cleanup(); setPhase("login"); overlay("ol-msg", null);
+  const cb = $("ol-create"), jb = $("ol-join"); if(cb) cb.disabled = false; if(jb) jb.disabled = false;
+}
 function restoreHost(o){
-  S.role = "host"; S.name = o.name; S.token = o.token; S.max = o.max || 4; S.code = o.code; S.leaving = false;
+  S.role = "host"; S.name = o.name; S.token = o.token; S.max = o.max || 4; S.code = o.code; S.leaving = false; S.restoring = true;
   const cb = $("ol-create"), jb = $("ol-join"); if(cb) cb.disabled = true; if(jb) jb.disabled = true;
-  let tries = 0;
+  showRestore(false);
+  let tries = 0, timer = 0, watch = 0;
   const attempt = () => {
+    clearTimeout(timer); clearTimeout(watch);
+    if(!S.restoring || S.role !== "host") return;
+    try{ if(S.peer) S.peer.destroy(); }catch(e){}
     const peer = new Peer(PREFIX + o.code, peerOptions());
     S.peer = peer;
+    /* Netz weg, Vermittler nicht erreichbar, Code noch belegt …: nie aufgeben, nur später noch einmal */
+    const again = () => { if(peer !== S.peer || !S.restoring) return; clearTimeout(watch); try{ peer.destroy(); }catch(e){} timer = setTimeout(attempt, Math.min(1500 + tries++ * 500, 6000)); };
+    watch = setTimeout(() => { if(!peer.open) again(); }, 15000);
     peer.on("open", () => {
+      if(peer !== S.peer || !S.restoring) return;
+      clearTimeout(watch); S.restoring = false; S.restoreKick = null;
       S.players = (o.players || []).map(p => ({ token:p.token, name:p.name, ready:false, connected:p.token === o.token, conn:null, seen:Date.now() }));
       if(!S.players.some(p => p.token === o.token)) S.players.unshift({ token:o.token, name:o.name, ready:false, connected:true, conn:null, seen:Date.now() });
       S.you = S.players.findIndex(p => p.token === o.token);
@@ -4359,20 +4405,27 @@ function restoreHost(o){
         onStart({ game:o.game, seed:o.seed, names:o.names });
         o.log.forEach(m => onAction(m));
       }
-      updatePause(); renderAll();
+      overlay("ol-msg", null);
+      updatePause(); renderAll(); saveSessNow();
       if(cb) cb.disabled = false; if(jb) jb.disabled = false;
       toast("Raum wiederhergestellt – Mitspieler verbinden sich wieder.");
     });
     peer.on("connection", hostAccept);
-    peer.on("disconnected", () => { setTimeout(() => { if(peer === S.peer && peer.disconnected && !peer.destroyed){ try{ peer.reconnect(); }catch(e){} } }, 1000); });
-    peer.on("error", e => {
-      if(S.phase !== "login") return;
-      if(e && e.type === "unavailable-id" && tries++ < 40){ try{ peer.destroy(); }catch(x){} setTimeout(attempt, 2000); return; }
-      clearSess(); S.role = null; S.peer = null; if(cb) cb.disabled = false; if(jb) jb.disabled = false;
-      showMsg("Raum nicht wiederherstellbar", netErr(e));
+    peer.on("disconnected", () => {
+      if(S.restoring){ if(!peer.open) again(); return; }
+      setTimeout(() => { if(peer === S.peer && peer.disconnected && !peer.destroyed){ try{ peer.reconnect(); }catch(e){} } }, 1000);
     });
+    peer.on("error", e => { if(S.restoring) again(); });
   };
+  S.restoreKick = () => { if(S.restoring){ clearTimeout(timer); tries = 0; attempt(); } };
   attempt();
+}
+function restoreClient(o){
+  S.mySeat = -1; S.role = "client"; S.name = o.name; S.token = o.token; S.code = o.code;
+  S.leaving = false; S.reconnecting = true; S.retryCount = 0; S.restoring = true; S.peer = null; S.hostConn = null;
+  const cb = $("ol-create"), jb = $("ol-join"); if(cb) cb.disabled = true; if(jb) jb.disabled = true;
+  showRestore(false);
+  scheduleRetry(0);                                            /* baut Peer + Verbindung auf und versucht es notfalls endlos weiter */
 }
 function restoreSess(){
   let o = null;
@@ -4380,8 +4433,7 @@ function restoreSess(){
   if(!o || !o.code || !o.token || !o.r || Date.now() - (o.ts || 0) > SESS_MAX_AGE){ clearSess(); return; }
   SS.set("gt-token", o.token);
   const nm = $("ol-name"); if(nm) nm.value = o.name || "";
-  toast("Verbindung zum Raum wird wiederhergestellt …");
-  if(o.r === "client") joinRoom(o.code);
+  if(o.r === "client") restoreClient(o);
   else if(o.r === "host") restoreHost(o);
 }
 
