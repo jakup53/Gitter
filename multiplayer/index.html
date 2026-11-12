@@ -4011,8 +4011,8 @@ function renderHud(){
 function renderPause(){
   if(S.phase === "playing" && S.reconnecting){
     overlay("ol-pause", b => {
-      b.appendChild(h("h3", { text:"Verbindung verloren" }));
-      b.appendChild(h("p", { text:"Ich versuche, die Verbindung zum Raum wiederherzustellen …" }));
+      b.appendChild(h("h3", { text:"Warten auf den Host" }));
+      b.appendChild(h("p", { text:"Der Host ist gerade nicht verbunden. Das Spiel geht automatisch weiter, sobald er wieder da ist." }));
       b.appendChild(h("button", { type:"button", class:"btn btn-ghost", text:"Verlassen", onclick:() => leaveRoom(false) }));
     }); return;
   }
@@ -4337,7 +4337,7 @@ document.addEventListener("input", onInputCapture, true);
 window.addEventListener("beforeunload", () => { if(S.role === "client" && S.phase !== "playing") sendTo(S.hostConn, { t:"leave" }); });
 
 /* ---------- Sitzung merken: nach Neuladen (z. B. iPad-Safari verwirft die Seite) automatisch zurück in den Raum ---------- */
-const SESS_KEY = "gt-sess", SESS_MAX_AGE = 3 * 24 * 3600 * 1000;   /* gesicherter Spielstand bleibt 3 Tage erhalten */
+const SESS_KEY = "gt-sess", SESS_MAX_AGE = 5 * 3600 * 1000;   /* gesicherter Spielstand bleibt max. 5 Stunden erhalten */
 let saveT = 0;
 function clearSess(){ clearTimeout(saveT); saveT = 0; try{ localStorage.removeItem(SESS_KEY); }catch(e){} }
 function saveSessNow(){
@@ -4367,8 +4367,9 @@ function showRestore(confirming){
       b.appendChild(h("button", { type:"button", class:"btn btn-primary", text:"Weiter warten", onclick:() => showRestore(false) }));
       b.appendChild(h("button", { type:"button", class:"btn btn-ghost", text:"Abbrechen und verwerfen", onclick:cancelRestore }));
     }else{
-      b.appendChild(h("h3", { text:"Spiel wird wiederhergestellt …" }));
-      b.appendChild(h("p", { text:"Dein Spielstand ist gesichert. Das kann einen Moment dauern – es wird automatisch weiter versucht." }));
+      const waitHost = S.role === "client";
+      b.appendChild(h("h3", { text: waitHost ? "Warten auf den Host" : "Spiel wird wiederhergestellt …" }));
+      b.appendChild(h("p", { text: waitHost ? "Der Host ist gerade nicht verbunden. Du wirst automatisch wieder verbunden, sobald er da ist." : "Dein Spielstand ist gesichert. Das kann einen Moment dauern – es wird automatisch weiter versucht." }));
       b.appendChild(h("button", { type:"button", class:"btn btn-ghost", text:"Abbrechen", onclick:() => showRestore(true) }));
     }
   });
