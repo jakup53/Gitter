@@ -6201,10 +6201,6 @@ html.sy-fs #sy-screen-game{position:fixed;inset:0;z-index:9999;background:var(--
       <button type="button" class="btn btn-ghost" id="sy-rules-btn" style="margin-top:10px;padding:10px">Spielregeln</button>
     </div>
     <div class="section">
-      <div class="section-title">Schnellstart</div>
-      <div class="sy-presets" id="sy-presets"></div>
-    </div>
-    <div class="section">
       <div class="section-title">Anzahl Detektive</div>
       <div class="choice-row" id="sy-n"><div class="pill" data-n="2">2</div><div class="pill" data-n="3">3</div><div class="pill" data-n="4">4</div><div class="pill" data-n="5">5</div></div>
     </div>
@@ -28614,14 +28610,6 @@ if (syRoot) (function syUI() {
 
   /* ================= Startbildschirm ================= */
   function renderHome() {
-    const el = syEl('sy-presets');
-    const PRE = [
-      { k: 'x', t: 'Ich bin Mr. X', d: 'Entkomme den KI-Detektiven. Nur du siehst deine Position.' },
-      { k: 'd', t: 'Ich bin Detektiv', d: 'Du führst alle Detektive und jagst einen KI-Mr.-X.' },
-      { k: 'hot', t: 'Mehrspieler an einem Gerät', d: 'Mr. X gegen die Detektive. Das Gerät wird weitergereicht, Mr. X’ Zug bleibt geheim.' },
-      { k: 'ai', t: 'KI gegen KI (zuschauen)', d: 'Alle Plätze werden von der KI gespielt.' }
-    ];
-    el.innerHTML = PRE.map(p => '<button type="button" class="sy-preset" data-pre="' + p.k + '"><b>' + p.t + '</b><span>' + p.d + '</span></button>').join('');
     renderSeats();
     const sel = (id, attr, val) => syRoot.querySelectorAll('#' + id + ' .pill').forEach(p => p.classList.toggle('selected', String(p.dataset[attr]) === String(val)));
     sel('sy-n', 'n', setup.nDet); sel('sy-mode', 'mode', setup.mode); sel('sy-level', 'lv', setup.level);
@@ -28640,17 +28628,8 @@ if (syRoot) (function syUI() {
         '<input class="sy-name" maxlength="18" placeholder="' + (s.kind === 'human' ? 'Name (optional)' : 'wird von der KI gespielt') + '" value="' + syEsc(s.name) + '" ' + (s.kind === 'human' ? '' : 'disabled') + '></div>';
     }).join('');
   }
-  function applyPreset(k) {
-    const ids = seatIds(5);
-    for (const id of ids) setup.seats[id].kind = 'ai';
-    if (k === 'x') setup.seats.X.kind = 'human';
-    else if (k === 'd') { for (const id of ids) if (id !== 'X') setup.seats[id].kind = 'human'; if (setup.nDet < 3) setup.nDet = 4; }
-    else if (k === 'hot') for (const id of ids) setup.seats[id].kind = 'human';
-    lsSet(SY_LS.setup, setup); renderHome();
-  }
   syRoot.addEventListener('click', e => {
     const t = e.target;
-    const pre = t.closest('[data-pre]'); if (pre) { applyPreset(pre.dataset.pre); return; }
     const kind = t.closest('.sy-kind [data-kind]'); if (kind) { const id = kind.closest('.sy-seatrow').dataset.seat; setup.seats[id].kind = kind.dataset.kind; lsSet(SY_LS.setup, setup); renderHome(); return; }
     const pn = t.closest('#sy-n .pill'); if (pn) { setup.nDet = +pn.dataset.n; lsSet(SY_LS.setup, setup); renderHome(); return; }
     const pm = t.closest('#sy-mode .pill'); if (pm) { setup.mode = pm.dataset.mode; lsSet(SY_LS.setup, setup); renderHome(); return; }
