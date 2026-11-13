@@ -1766,6 +1766,10 @@ html.sy-fs #sy-screen-game{position:fixed;inset:0;z-index:9999;background:var(--
 /* Mögliche Zielfelder: weißes Aufleuchten (pulsierender Schein), gewähltes Feld kräftig gefüllt */
 .sy-legal{fill:rgba(255,255,255,.34);stroke:#fff;stroke-width:5;filter:drop-shadow(0 0 7px #fff) drop-shadow(0 0 16px rgba(255,255,255,.9));animation:syPulse 1.1s ease-in-out infinite;}
 @keyframes syPulse{0%,100%{opacity:1;}50%{opacity:.62;}}
+.sy-oseat{margin-bottom:10px;}
+.sy-oseat .sy-who{font-size:12px;color:var(--paper);display:flex;align-items:center;gap:7px;margin-bottom:6px;}
+.sy-oseat .choice-row{flex-wrap:wrap;}
+.sy-oseat .pill.locked{opacity:.3;pointer-events:none;}
 .sy-legal-sel{fill:rgba(255,255,255,.5);stroke:#fff;stroke-width:6;filter:drop-shadow(0 0 9px #fff) drop-shadow(0 0 20px #fff);}
 .sy-sc{transform:scale(var(--ts,1));}
 .sy-tok{transition:transform .5s cubic-bezier(.4,.1,.2,1);}
@@ -2862,14 +2866,15 @@ body[data-ol-wait="1"] #app-sy .screen.active .btn{visibility:visible !important
       <button type="button" class="btn btn-ghost" id="sy-rules-btn" style="margin-top:10px;padding:10px">Spielregeln</button>
     </div>
     <div class="section">
-      <div class="section-title">Wer spielt Mr. X?</div>
-      <div class="choice-row" id="sy-xsel"></div>
-      <div class="note-text" id="sy-x-note"></div>
-    </div>
-    <div class="section">
       <div class="section-title">Anzahl Detektive</div>
       <div class="choice-row" id="sy-n"><div class="pill" data-n="2">2</div><div class="pill" data-n="3">3</div><div class="pill" data-n="4">4</div><div class="pill" data-n="5">5</div></div>
       <div class="note-text" id="sy-n-note"></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Plätze – frei wählbar</div>
+      <div id="sy-oseats"></div>
+      <div class="choice-row" style="margin-top:4px"><button type="button" class="btn btn-ghost" id="sy-shuffle" style="padding:9px">Zufällig verteilen</button><button type="button" class="btn btn-ghost" id="sy-seatreset" style="padding:9px">Automatisch</button></div>
+      <div class="note-text" id="sy-x-note"></div>
     </div>
     <div class="section">
       <div class="section-title">Spiellänge</div>
@@ -2877,7 +2882,7 @@ body[data-ol-wait="1"] #app-sy .screen.active .btn{visibility:visible !important
       <div class="note-text" id="sy-mode-note"></div>
     </div>
     <div class="section" id="sy-level-sec">
-      <div class="section-title">KI-Stärke (Mr. X)</div>
+      <div class="section-title">KI-Stärke</div>
       <div class="choice-row" id="sy-level"><div class="pill" data-lv="1">Leicht</div><div class="pill" data-lv="2">Mittel</div><div class="pill" data-lv="3">Schwer</div></div>
     </div>
     <div class="section"><div class="note-text" id="sy-roles-note"></div></div>
@@ -12625,12 +12630,18 @@ if (syRoot) (function syUI() {
   const tkn = (t, n) => '<span class="sy-tkn' + (n === 0 ? ' zero' : '') + '">' + tk(t) + '<i>' + n + '</i></span>';
 
   /* ---------- Einstellungen (nur der Host stellt ein; Klicks werden an alle verteilt) ---------- */
-  const DEF = () => ({ nDet: 3, mode: 'classic', level: 2, x: 'rand' });   // x: 'rand' | 'ai' | Spielerindex (Zahl)
+  /* seats: je Platz 'auto' (Zufall / automatisch verteilt) | 'ai' (Computer) | Spielerindex (Zahl) */
+  const DEF = () => ({ nDet: 3, mode: 'classic', level: 2, seats: { X: 'auto', D1: 'auto', D2: 'auto', D3: 'auto', D4: 'auto', D5: 'auto' } });
   let setup = (function () {
     const d = DEF(), s = lsGet(SY_LS.setup, null); if (!s) return d;
-    try { d.nDet = Math.max(2, Math.min(5, s.nDet | 0)) || 3; if (SY.MODES[s.mode]) d.mode = s.mode; if (s.level >= 1 && s.level <= 3) d.level = s.level; if (s.x === 'ai') d.x = 'ai'; } catch (e) {}
+    try {
+      d.nDet = Math.max(2, Math.min(5, s.nDet | 0)) || 3; if (SY.MODES[s.mode]) d.mode = s.mode; if (s.level >= 1 && s.level <= 3) d.level = s.level;
+      if (s.x === 'ai') d.seats.X = 'ai';
+      if (s.seats) for (const k in d.seats) if (s.seats[k] === 'ai') d.seats[k] = 'ai';
+    } catch (e) {}
     return d;
   })();
+  const saveSetup = () => { const c = JSON.parse(JSON.stringify(setup)); for (const k in c.seats) if (typeof c.seats[k] === 'number') c.seats[k] = 'auto'; lsSet(SY_LS.setup, c); };
   const pref = Object.assign({ rot: 'auto' }, lsGet(SY_LS.pref, {}));
   const defName = seat => seat === 'X' ? 'Mr. X' : 'Detektiv ' + seat.slice(1);
   const seatName = (seat, cfg) => defName(seat);
@@ -12638,45 +12649,97 @@ if (syRoot) (function syUI() {
   const dotCls = seat => seat === 'X' ? 'x' : 'd' + seat.slice(1);
   const roster = () => (window.OL && OL.roster) ? OL.roster : [];
 
-  /* Rollenverteilung aus Einstellung + Spielerzahl (deterministisch, auf allen Geraeten gleich) */
+  /* Rollenverteilung aus Einstellung + Spielerzahl (deterministisch, auf allen Geraeten gleich).
+     Ein Platz ist ein Spieler (Index), die KI (-1) oder 'auto'. Mr. X ist nie zugleich Detektiv. */
   function planRoles(n, names, rndFn) {
-    let xOwner;
-    if (setup.x === 'ai') xOwner = -1;
-    else if (typeof setup.x === 'number' && setup.x >= 0 && setup.x < n) xOwner = setup.x;
-    else xOwner = Math.floor(rndFn() * n);
-    const detHumans = []; for (let i = 0; i < n; i++) if (i !== xOwner) detHumans.push(i);
-    const nDet = Math.max(2, Math.min(5, Math.max(setup.nDet, Math.min(5, detHumans.length))));
-    const owner = { X: xOwner };
+    const seats = Object.assign(DEF().seats, setup.seats || {});
+    const valid = v => typeof v === 'number' && v >= 0 && v < n;
+    const sv = id => seats[id] === 'ai' ? 'ai' : valid(seats[id]) ? seats[id] : 'auto';
+    const baseN = Math.max(2, Math.min(5, setup.nDet | 0 || 3)), baseIds = SY.detIds(baseN);
+    const all = []; for (let i = 0; i < n; i++) all.push(i);
+    // Mr. X
+    let xOwner; const sx = sv('X');
+    if (sx === 'ai') xOwner = -1;
+    else if (sx !== 'auto') xOwner = sx;
+    else {
+      const free = all.filter(i => !baseIds.some(id => sv(id) === i));
+      const pool = free.length ? free : all;
+      xOwner = pool[Math.floor(rndFn() * pool.length)];
+    }
+    const dv = id => { const v = sv(id); return v === xOwner ? 'auto' : v; };
+    const others = all.filter(i => i !== xOwner);
+    const allAuto = baseIds.every(id => dv(id) === 'auto');
+    // sind alle Detektive 'auto', bekommt jeder Mitspieler mindestens einen (wie bisher)
+    const nDet = allAuto ? Math.max(baseN, Math.min(5, others.length)) : baseN;
     const ids = SY.detIds(nDet);
-    ids.forEach((id, i) => { owner[id] = detHumans.length ? detHumans[i % detHumans.length] : -1; });
+    const count = {}; others.forEach(i => { count[i] = 0; });
+    const owner = { X: xOwner };
+    for (const id of ids) { const v = ids.indexOf(id) < baseN ? dv(id) : 'auto'; if (typeof v === 'number') { owner[id] = v; count[v] = (count[v] || 0) + 1; } else if (v === 'ai') owner[id] = -1; }
+    for (const id of ids) if (owner[id] === undefined) {
+      if (!others.length) { owner[id] = -1; continue; }
+      let best = others[0]; for (const i of others) if (count[i] < count[best]) best = i;
+      owner[id] = best; count[best]++;
+    }
+    const detHumans = []; for (const id of ids) if (owner[id] >= 0 && detHumans.indexOf(owner[id]) < 0) detHumans.push(owner[id]);
+    detHumans.sort((a, b) => a - b);
     return { xOwner, detHumans, nDet, owner };
   }
 
   /* ================= Startbildschirm ================= */
   function renderHome() {
     const names = roster(), n = names.length || 2;
-    if (typeof setup.x === 'number' && setup.x >= n) setup.x = 'rand';
-    const xs = syEl('sy-xsel');
-    let h = '<div class="pill" data-x="rand">Zufällig</div>';
-    names.forEach((nmz, i) => { h += '<div class="pill" data-x="' + i + '">' + syEsc(nmz) + '</div>'; });
-    h += '<div class="pill" data-x="ai">Computer (KI)</div>';
-    xs.innerHTML = h;
+    for (const k in setup.seats) if (typeof setup.seats[k] === 'number' && setup.seats[k] >= n) setup.seats[k] = 'auto';
+    const nd = Math.max(2, Math.min(5, setup.nDet | 0 || 3)), ids = seatIds(nd);
+    const xv = setup.seats.X, xNum = typeof xv === 'number' ? xv : -1;
+    let h = '';
+    for (const id of ids) {
+      const cur = setup.seats[id], isX = id === 'X';
+      let pills = '<div class="pill' + (cur === 'auto' ? ' selected' : '') + '" data-seat="' + id + '" data-v="auto">' + (isX ? 'Zufällig' : 'Auto') + '</div>';
+      names.forEach((nmz, i) => { pills += '<div class="pill' + (cur === i ? ' selected' : '') + (!isX && xNum === i ? ' locked' : '') + '" data-seat="' + id + '" data-v="' + i + '">' + syEsc(nmz) + '</div>'; });
+      pills += '<div class="pill' + (cur === 'ai' ? ' selected' : '') + '" data-seat="' + id + '" data-v="ai">KI</div>';
+      h += '<div class="sy-oseat"><div class="sy-who"><span class="sy-dot ' + dotCls(id) + '"></span>' + (isX ? 'Mr. X' : 'Detektiv ' + id.slice(1)) + '</div><div class="choice-row">' + pills + '</div></div>';
+    }
+    syEl('sy-oseats').innerHTML = h;
     const sel = (id, attr, val) => syRoot.querySelectorAll('#' + id + ' .pill').forEach(p => p.classList.toggle('selected', String(p.dataset[attr]) === String(val)));
-    sel('sy-xsel', 'x', setup.x); sel('sy-n', 'n', setup.nDet); sel('sy-mode', 'mode', setup.mode); sel('sy-level', 'lv', setup.level);
-    syEl('sy-level-sec').style.display = setup.x === 'ai' ? '' : 'none';
-    const detH = n - (setup.x === 'ai' ? 0 : 1);
-    syEl('sy-x-note').textContent = setup.x === 'ai' ? 'Mr. X wird vom Computer gespielt. Alle Mitspieler sind Detektive.' : setup.x === 'rand' ? 'Wer Mr. X ist, wird beim Start ausgelost – alle anderen sind Detektive.' : 'Mr. X ist ' + (names[setup.x] || 'Spieler') + ', alle anderen sind Detektive.';
-    const nEff = Math.max(setup.nDet, Math.min(5, detH));
-    syEl('sy-n-note').textContent = nEff > setup.nDet ? 'Es spielen ' + detH + ' Detektiv-Spieler mit – daher gibt es mindestens ' + nEff + ' Detektive.' : (detH > 0 && nEff > detH ? 'Mit ' + detH + ' Detektiv-Spieler(n) steuert jeder mehrere Detektive.' : '');
+    sel('sy-n', 'n', setup.nDet); sel('sy-mode', 'mode', setup.mode); sel('sy-level', 'lv', setup.level);
+    syEl('sy-level-sec').style.display = ids.some(id => setup.seats[id] === 'ai') ? '' : 'none';
+    const plan = planRoles(n, names, () => 0), allAuto = ids.slice(1).every(id => setup.seats[id] === 'auto');
+    let xn = xv === 'auto' ? 'Mr. X wird beim Start unter den Spielern ohne eigenen Detektiv-Platz ausgelost.' : xv === 'ai' ? 'Mr. X wird vom Computer gespielt.' : 'Mr. X ist ' + (names[xv] || 'Spieler') + '.';
+    if (!allAuto || xv !== 'auto') {
+      const placed = new Set(); if (xNum >= 0) placed.add(xNum); ids.slice(1).forEach(id => { if (typeof setup.seats[id] === 'number') placed.add(setup.seats[id]); });
+      if (!allAuto && xv !== 'auto' && names.length) { const left = names.filter((_, i) => !placed.has(i) && !ids.slice(1).some(id => setup.seats[id] === 'auto')); if (left.length) xn += ' Ohne Platz (schauen zu): ' + left.join(', ') + '.'; }
+    }
+    syEl('sy-x-note').textContent = xn;
+    const detH = plan.detHumans.length;
+    syEl('sy-n-note').textContent = allAuto && plan.nDet > setup.nDet ? 'Es spielen ' + detH + ' Detektiv-Spieler mit – daher gibt es mindestens ' + plan.nDet + ' Detektive.' : (allAuto && detH > 0 && plan.nDet > detH ? 'Mit ' + detH + ' Detektiv-Spieler(n) steuert jeder mehrere Detektive.' : '');
     syEl('sy-mode-note').textContent = setup.mode === 'classic' ? 'Das Fahrtenbuch hat 24 Felder. Ein Doppelzug belegt zwei Felder. Nach dem 24. Zug (und der Antwort der Detektive) gewinnt Mr. X.' : 'Neuere Ravensburger-Regel: Mr. X gewinnt, wenn er 22 Runden überlebt.';
-    syEl('sy-roles-note').textContent = setup.x === 'ai' && n > 5 ? 'Hinweis: Mehr als 5 Detektive gibt es nicht – überzählige Spieler schauen zu.' : '';
+    syEl('sy-roles-note').textContent = '';
+  }
+  function chooseSeat(id, v) {
+    const names = roster(), n = names.length || 2;
+    const val = v === 'auto' ? 'auto' : v === 'ai' ? 'ai' : +v;
+    if (typeof val === 'number' && val >= n) return;
+    if (id === 'X') { if (typeof val === 'number') for (const k in setup.seats) if (k !== 'X' && setup.seats[k] === val) setup.seats[k] = 'auto'; }
+    else if (typeof val === 'number' && setup.seats.X === val) return;      // Mr. X ist nicht zugleich Detektiv
+    setup.seats[id] = val; saveSetup(); renderHome();
   }
   syRoot.addEventListener('click', e => {
     const t = e.target;
-    const px = t.closest('#sy-xsel .pill'); if (px) { const v = px.dataset.x; setup.x = v === 'rand' ? 'rand' : v === 'ai' ? 'ai' : +v; lsSet(SY_LS.setup, setup); renderHome(); return; }
-    const pn = t.closest('#sy-n .pill'); if (pn) { setup.nDet = +pn.dataset.n; lsSet(SY_LS.setup, setup); renderHome(); return; }
-    const pm = t.closest('#sy-mode .pill'); if (pm) { setup.mode = pm.dataset.mode; lsSet(SY_LS.setup, setup); renderHome(); return; }
-    const pl = t.closest('#sy-level .pill'); if (pl) { setup.level = +pl.dataset.lv; lsSet(SY_LS.setup, setup); renderHome(); return; }
+    const ps = t.closest('#sy-oseats .pill'); if (ps) { chooseSeat(ps.dataset.seat, ps.dataset.v); return; }
+    if (t.closest('#sy-seatreset')) { for (const k in setup.seats) setup.seats[k] = 'auto'; saveSetup(); renderHome(); return; }
+    if (t.closest('#sy-shuffle')) {
+      const names = roster(), n = names.length; if (!n) return;
+      const order = []; for (let i = 0; i < n; i++) order.push(i);
+      for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = order[i]; order[i] = order[j]; order[j] = tmp; }
+      const nd = Math.max(2, Math.min(5, setup.nDet | 0 || 3));
+      for (const k in setup.seats) setup.seats[k] = 'auto';
+      setup.seats.X = order[0];
+      const rest = order.slice(1); SY.detIds(nd).forEach((id, i) => { setup.seats[id] = rest.length ? rest[i % rest.length] : 'ai'; });
+      saveSetup(); renderHome(); return;
+    }
+    const pn = t.closest('#sy-n .pill'); if (pn) { setup.nDet = +pn.dataset.n; saveSetup(); renderHome(); return; }
+    const pm = t.closest('#sy-mode .pill'); if (pm) { setup.mode = pm.dataset.mode; saveSetup(); renderHome(); return; }
+    const pl = t.closest('#sy-level .pill'); if (pl) { setup.level = +pl.dataset.lv; saveSetup(); renderHome(); return; }
   });
   syEl('sy-rules-btn').addEventListener('click', () => showRules(false));
 
@@ -12717,6 +12780,11 @@ if (syRoot) (function syUI() {
     if (plan.xOwner < 0) {
       sess.host.assign('X', 'aiX', 'KI', 'ai');
       if (isHost) sess.ctrls.push(new SY.AIController(aiTransport('aiX'), { seats: ['X'], level: cfg.level, delay: 800, seed: (st.seed | 0) + 1 }));
+    }
+    const aiD = ids.filter(id => id !== 'X' && plan.owner[id] < 0);
+    if (aiD.length) {
+      aiD.forEach(id => sess.host.assign(id, 'aiD', 'KI', 'ai'));
+      if (isHost) sess.ctrls.push(new SY.AIController(aiTransport('aiD'), { seats: aiD, level: cfg.level, delay: 900, seed: (st.seed | 0) + 2 }));
     }
     // Wachhund: wurde ein KI-Zug waehrend einer Pause verworfen, KI neu anstossen
     if (isHost && sess.ctrls.length) sess.dog = setInterval(() => {
@@ -13043,7 +13111,7 @@ if (syRoot) (function syUI() {
   function syncFs() {
     const on = syRoot.classList.contains('active') && game.classList.contains('active');
     document.documentElement.classList.toggle('sy-fs', on);
-    if (on) requestAnimationFrame(() => onResize(false));
+    if (on) { hudSync(); requestAnimationFrame(() => { hudSync(); onResize(false); }); }
   }
   new MutationObserver(syncFs).observe(syRoot, { attributes: true, attributeFilter: ['class'] });
   new MutationObserver(syncFs).observe(game, { attributes: true, attributeFilter: ['class'] });
@@ -13205,13 +13273,21 @@ if (syRoot) (function syUI() {
   renderHome();
 
   /* ---------- Online-Adapter ---------- */
-  (function hudSize() {
+  /* Hoehe der Online-Leiste (Spielernamen / Raumcode / Raum schliessen) messen, damit sie die SY-Leiste nie verdeckt.
+     Die Leiste wird erst spaeter gebaut und aendert ihre Hoehe (Umbruch bei vielen Namen): daher lazy und regelmaessig. */
+  function hudSync() {
     const hud = document.getElementById('ol-hud'); if (!hud) return;
-    const set = () => document.documentElement.style.setProperty('--sy-hud', (hud.offsetHeight || 0) + 'px');
-    if (window.ResizeObserver) new ResizeObserver(set).observe(hud); else window.addEventListener('resize', set);
-    new MutationObserver(set).observe(hud, { childList: true, subtree: true });
-    set();
-  })();
+    const px = (hud.offsetHeight || 0) + 'px', st = document.documentElement.style;
+    if (st.getPropertyValue('--sy-hud') !== px) st.setProperty('--sy-hud', px);
+    if (!hudSync.obs) {
+      hudSync.obs = true;
+      if (window.ResizeObserver) new ResizeObserver(hudSync).observe(hud);
+      new MutationObserver(hudSync).observe(hud, { childList: true, subtree: true, characterData: true });
+    }
+  }
+  window.addEventListener('resize', hudSync); window.addEventListener('orientationchange', () => setTimeout(hudSync, 250));
+  setInterval(() => { if (document.documentElement.classList.contains('sy-fs')) hudSync(); }, 400);
+  hudSync();
   OL.register('sy', {
     homeId: 'sy-screen-home',
     onReady() { renderHome(); },
